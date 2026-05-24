@@ -1,0 +1,45 @@
+{
+  "name": "models-benchmark",
+  "version": "1.0.0",
+  "description": "Benchmarking different models across different providers. Mainly targeting Anthropic, OpenAI and Gemini.",
+  "keywords": [
+    "models",
+    "benchmark"
+  ],
+  "homepage": "https://github.com/aspivakov/models-benchmark#readme",
+  "bugs": {
+    "url": "https://github.com/aspivakov/models-benchmark/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aspivakov/models-benchmark.git"
+  },
+  "license": "MIT",
+  "author": "Andrii Spivakov",
+  "main": "index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "run:haiku": "tsx src/index.ts haiku",
+    "run:sonnet": "tsx src/index.ts sonnet",
+    "run:sonnet:thinking": "tsx src/index.ts sonnet-thinking",
+    "run:gpt4o-mini": "tsx src/index.ts gpt4o-mini",
+    "run:gpt4o": "tsx src/index.ts gpt4o",
+    "run:o4-mini": "tsx src/index.ts o4-mini",
+    "run:gemini-flash": "tsx src/index.ts gemini-flash",
+    "run:gemini-pro": "tsx src/index.ts gemini-pro",
+    "run:gemini-pro-thinking": "tsx src/index.ts gemini-pro-thinking"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@google/genai": "^2.6.0",
+    "dotenv": "^17.4.2",
+    "jsonrepair": "^3.14.0",
+    "openai": "^6.39.0"
+  }
+}
