@@ -109,14 +109,75 @@ output/
 
 Each JSON file contains the full `RunResult` including extracted fields, token counts, cost, and latency.
 
-## Comparing results
+## Evaluating results
 
-With ground-truth JSONs in place, compare per field:
+### Requirements before evaluating
 
-- **Exact match rate** on categorical fields (`remote_policy`, `seniority`)
-- **Presence/absence accuracy** on skill arrays
-- **Latency** (`latencyMs`) for time-sensitive use cases
-- **Cost** (`costUsd`) to evaluate price/accuracy trade-offs
+The eval pipeline scores each `(model, input file)` pair, so all three sources must be present and aligned by filename (`jpN.txt` ↔ `jpN.json`):
+
+| Location                          | What it holds                          | How it gets there                                          |
+| --------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
+| `input/<inputFile>.txt`           | Original posting text (source of truth) | You add these manually                                     |
+| `ground_truth/<inputFile>.json`   | Reference extraction (a guide)          | Generated separately (e.g. by Claude Opus) — may contain errors |
+| `output/<slug>/<inputFile>.json`  | A model's `RunResult` to be scored      | Produced by the `run:*` benchmark commands                 |
+
+A pair is only scored when **all three** exist. Pairs missing an `input/` or `ground_truth/` file are skipped with a warning.
+
+### Command sequence
+
+Run the benchmark first to produce model outputs, then the eval pipeline:
+
+```bash
+# 1. Generate model outputs (one or more configs)
+npm run run:haiku
+npm run run:gemini-pro
+# ...etc
+
+# 2. Score outputs against ground truth, then aggregate
+npm run eval:all
+```
+
+`eval:all` chains the two eval stages (`eval:judge` then `eval:report`). You can also run them individually.
+
+### Stage 1 — `eval:judge`
+
+For each `(model, input file)` pair, scores fields against ground truth using a hybrid strategy:
+
+- **Deterministic checks** (normalized string/range comparison, no LLM) for clean fields: `seniority`, `remote_policy`, `years_experience`, `company`, `title`.
+- **LLM-as-judge** (Gemini 2.5 Pro) for fields where paraphrase and partial overlap matter: `location`, `salary_range`, `benefits`, `required_skills`, `nice_to_have_skills`. The judge sees the original posting, the reference, and the model output, and scores precision/recall on list fields. Hallucinated and missed items are recorded by name.
+
+Results are written one JSON per pair to `eval/scores/<slug>/<inputFile>.json`. The script is **resumable** — already-scored pairs are skipped, so re-running only scores new pairs (and only the new pairs incur judge API cost).
+
+```bash
+# Score all models that have output dirs
+npm run eval:judge
+
+# Score only specific models (pass slugs)
+npm run eval:judge -- claude-haiku-4-5 gemini-2.5-pro
+
+# Score only specific input files (across selected/all models)
+npm run eval:judge -- --file jp1,jp5
+npm run eval:judge -- claude-haiku-4-5 --file=jp1.txt
+```
+
+Progress is printed per pair as `[<slug>] <file> → score X.XX ($Y judge cost, Zms)`, and the run ends with total pairs scored and total judge cost. Errors on individual pairs are logged and skipped rather than aborting the run.
+
+### Stage 2 — `eval:report`
+
+Reads all `eval/scores/**/*.json`, aggregates per model (also rolling up extraction cost/latency from `output/<slug>/*.json`), writes `eval/summary.json` (sorted by overall score descending), and prints a comparison table.
+
+```bash
+npm run eval:report
+```
+
+`eval/scores/` and `eval/summary.json` are gitignored — scores are reproducible from inputs, and the summary is regenerable from scores.
+
+## Methodology notes
+
+- **Reference extractions are model-generated, not hand-labeled.** They were created by Claude Opus and may contain errors. The judge is instructed to treat the original posting text as the source of truth, with the reference as a guide only — so model outputs that disagree with the reference but match the posting are scored as correct.
+- **Judge model:** Gemini 2.5 Pro. Chosen because it's a different provider family from most of the evaluated models (5 of 9 are Anthropic or OpenAI), reducing self-preference bias.
+- **List field scoring:** precision and recall are reported separately. Hallucinated items (in model output but not in the posting) and missed items (in the posting but absent from the model output) are listed by name in each per-pair score file, so any aggregate score is auditable.
+- **Overall score weighting:** deterministic fields weight 1 each (5 total); judge string fields weight 1 each (2 total); judge list fields weight 2 each (6 total). Total weight 13. List fields are weighted higher because they are richer signals and the harder task for these models.
 
 ## License
 

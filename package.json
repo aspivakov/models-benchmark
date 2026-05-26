@@ -28,7 +28,10 @@
     "run:gemini-flash": "tsx src/index.ts gemini-flash",
     "run:gemini-pro": "tsx src/index.ts gemini-pro",
     "run:gemini-pro-thinking": "tsx src/index.ts gemini-pro-thinking",
-    "serve": "tsx src/server.ts"
+    "serve": "tsx src/server.ts",
+    "eval:judge": "tsx src/eval/runJudge.ts",
+    "eval:report": "tsx src/eval/runReport.ts",
+    "eval:all": "npm run eval:judge && npm run eval:report"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

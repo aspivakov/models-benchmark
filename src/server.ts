@@ -1,364 +1,445 @@
 import { createServer } from "node:http";
-import { readdir, readFile } from "node:fs/promises";
-import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { loadSummaries } from "./eval/runReport";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUTPUT_DIR = resolve(__dirname, "..", "output");
-const GROUND_TRUTH_DIR = resolve(__dirname, "..", "ground_truth");
 const PORT = Number(process.env.PORT) || 3000;
-
-type Stat = {
-  latencyMs: number;
-  costUsd: number;
-  inputTokens: number;
-  outputTokens: number;
-  accuracy: number | null;
-  accuracyExclSkills: number | null;
-};
-
-const SKILL_KEYS = new Set(["required_skills", "nice_to_have_skills", "benefits"]);
-
-type Dataset = Record<string, Record<string, Stat>>;
-
-const naturalCompare = (a: string, b: string) =>
-  a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a === null || b === null) return false;
-  if (typeof a !== typeof b) return false;
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false;
-    return a.every((x, i) => deepEqual(x, b[i]));
-  }
-  if (typeof a === "object" && typeof b === "object") {
-    const ak = Object.keys(a as object);
-    const bk = Object.keys(b as object);
-    if (ak.length !== bk.length) return false;
-    return ak.every((k) => deepEqual((a as any)[k], (b as any)[k]));
-  }
-  return false;
-}
-
-function score(truth: unknown, candidate: unknown, excludeKeys?: Set<string>): { total: number; matches: number } {
-  if (Array.isArray(truth)) {
-    if (truth.length === 0) {
-      const ok = Array.isArray(candidate) && candidate.length === 0;
-      return { total: 1, matches: ok ? 1 : 0 };
-    }
-    let matches = 0;
-    if (Array.isArray(candidate)) {
-      const used = new Set<number>();
-      for (const t of truth) {
-        for (let i = 0; i < candidate.length; i++) {
-          if (used.has(i)) continue;
-          if (deepEqual(t, candidate[i])) {
-            used.add(i);
-            matches++;
-            break;
-          }
-        }
-      }
-    }
-    return { total: truth.length, matches };
-  }
-  if (truth && typeof truth === "object") {
-    let total = 0;
-    let matches = 0;
-    const obj = truth as Record<string, unknown>;
-    const cand = (candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>) : {});
-    for (const k of Object.keys(obj)) {
-      if (excludeKeys?.has(k)) continue;
-      const s = score(obj[k], cand[k], excludeKeys);
-      total += s.total;
-      matches += s.matches;
-    }
-    return { total, matches };
-  }
-  return { total: 1, matches: deepEqual(truth, candidate) ? 1 : 0 };
-}
-
-async function loadGroundTruth(): Promise<Map<string, unknown>> {
-  const out = new Map<string, unknown>();
-  try {
-    const files = (await readdir(GROUND_TRUTH_DIR)).filter((f) => f.endsWith(".json"));
-    for (const f of files) {
-      try {
-        const raw = await readFile(join(GROUND_TRUTH_DIR, f), "utf8");
-        out.set(f.replace(/\.json$/, ""), JSON.parse(raw));
-      } catch {
-        // skip
-      }
-    }
-  } catch {
-    // ground_truth dir may not exist
-  }
-  return out;
-}
-
-async function loadData(): Promise<Dataset> {
-  const truth = await loadGroundTruth();
-  const entries = await readdir(OUTPUT_DIR, { withFileTypes: true });
-  const models = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-  const data: Dataset = {};
-  for (const model of models) {
-    const modelDir = join(OUTPUT_DIR, model);
-    const files = (await readdir(modelDir)).filter((f) => f.endsWith(".json"));
-    const stats: Record<string, Stat> = {};
-    for (const file of files) {
-      try {
-        const raw = await readFile(join(modelDir, file), "utf8");
-        const json = JSON.parse(raw);
-        const key = file.replace(/\.json$/, "");
-        let accuracy: number | null = null;
-        let accuracyExclSkills: number | null = null;
-        if (truth.has(key)) {
-          const full = score(truth.get(key), json.output);
-          accuracy = full.total === 0 ? 0 : (full.matches / full.total) * 100;
-          const noSkills = score(truth.get(key), json.output, SKILL_KEYS);
-          accuracyExclSkills = noSkills.total === 0 ? 0 : (noSkills.matches / noSkills.total) * 100;
-        }
-        stats[key] = {
-          latencyMs: Number(json.latencyMs ?? 0),
-          costUsd: Number(json.costUsd ?? 0),
-          inputTokens: Number(json.inputTokens ?? 0),
-          outputTokens: Number(json.outputTokens ?? 0),
-          accuracy,
-          accuracyExclSkills,
-        };
-      } catch {
-        // skip malformed files
-      }
-    }
-    data[model] = stats;
-  }
-  return data;
-}
 
 const HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Models Benchmark</title>
+<title>Models Benchmark — Eval Report</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #222; }
-  h1 { margin: 0 0 16px; font-size: 22px; }
-  .controls { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
-  .controls .group { display: flex; flex-direction: column; gap: 8px; }
-  .controls label { font-size: 13px; }
-  .models { display: flex; flex-wrap: wrap; gap: 8px 16px; }
-  .models label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-  .actions { display: flex; gap: 8px; }
-  button { padding: 6px 12px; font-size: 13px; border: 1px solid #d0d0d0; background: #f5f5f5; border-radius: 6px; cursor: pointer; }
+  :root { --border: #e5e5e5; --muted: #666; --bg: #fafafa; --card: #fff; --accent: #2563eb; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: var(--bg); color: #222; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 16px; }
+  .controls .models { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+  .controls label { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .actions { display: flex; gap: 6px; }
+  button { padding: 5px 10px; font-size: 12px; border: 1px solid #d0d0d0; background: #f5f5f5; border-radius: 6px; cursor: pointer; }
   button:hover { background: #ececec; }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; }
-  .card h2 { margin: 0 0 12px; font-size: 16px; }
-  .chart-wrap { position: relative; height: 320px; }
-  .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid #e5e5e5; margin-bottom: 20px; }
+
+  table.leaderboard { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.leaderboard th, table.leaderboard td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+  table.leaderboard th { background: #f7f7f7; font-weight: 600; cursor: pointer; user-select: none; position: sticky; top: 0; }
+  table.leaderboard th .arrow { color: var(--muted); margin-left: 4px; font-size: 11px; }
+  table.leaderboard td.model, table.leaderboard th.model { text-align: left; }
+  table.leaderboard tr.dimmed { opacity: 0.35; }
+  .bar-cell { position: relative; min-width: 80px; }
+  .bar-cell .bar { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(37, 99, 235, 0.12); border-right: 2px solid var(--accent); pointer-events: none; }
+  .bar-cell .val { position: relative; }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); margin: 24px 0 16px; }
   .tab { padding: 8px 14px; font-size: 13px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; background: transparent; color: #555; }
   .tab:hover { background: #f0f0f0; }
-  .tab.active { background: #fff; border-color: #e5e5e5; color: #222; font-weight: 600; position: relative; top: 1px; }
+  .tab.active { background: var(--card); border-color: var(--border); color: #222; font-weight: 600; position: relative; top: 1px; }
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
-  .section-title { margin: 32px 0 16px; font-size: 18px; }
-  .section-title:first-child { margin-top: 0; }
+
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .charts.single { grid-template-columns: 1fr; }
+  .chart-wrap { position: relative; height: 360px; }
+  .chart-wrap.tall { height: 480px; }
   @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
+  .empty { padding: 32px; color: var(--muted); text-align: center; }
+  .legend-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
 </style>
 </head>
 <body>
-<h1>Models Benchmark</h1>
-<div class="controls">
-  <div class="group">
-    <strong style="font-size:13px;">Models</strong>
-    <div id="models" class="models"></div>
-    <div class="actions">
-      <button id="all">Select all</button>
-      <button id="none">Clear</button>
+<h1>Models Benchmark — Eval Report</h1>
+<div class="subtitle">Per-model summaries from <code>runReport</code>: deterministic field accuracy, LLM-judge scores, and extraction efficiency.</div>
+
+<div id="empty" class="card empty" style="display:none;">
+  No eval results found. Run <code>npm run eval:all</code> to generate scores in <code>eval/scores/</code>.
+</div>
+
+<div id="app" style="display:none;">
+  <div class="card" style="margin-bottom: 24px;">
+    <div class="controls">
+      <div style="font-size:13px; font-weight:600;">Models:</div>
+      <div id="models" class="models"></div>
+      <div class="actions">
+        <button id="all">Select all</button>
+        <button id="none">Clear</button>
+      </div>
+      <label style="margin-left:auto;"><input type="checkbox" id="pct" checked /> Show as %</label>
+    </div>
+    <h2>Leaderboard</h2>
+    <div style="overflow:auto; max-height: 480px;">
+      <table class="leaderboard" id="leaderboard"></table>
+    </div>
+    <div class="legend-note">Click a column header to sort. Click a model row to toggle inclusion in the charts below.</div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-target="tab-overall">Overall</button>
+    <button class="tab" data-target="tab-det">Deterministic fields</button>
+    <button class="tab" data-target="tab-judge">Judge fields</button>
+    <button class="tab" data-target="tab-skills">Skills detail</button>
+    <button class="tab" data-target="tab-eff">Efficiency</button>
+  </div>
+
+  <div id="tab-overall" class="tab-panel active">
+    <div class="charts">
+      <div class="card"><h2>Overall score</h2><div class="chart-wrap"><canvas id="c-overall"></canvas></div></div>
+      <div class="card"><h2>Deterministic vs Judge mean</h2><div class="chart-wrap"><canvas id="c-det-vs-judge"></canvas></div></div>
     </div>
   </div>
-  <div class="group">
-    <strong style="font-size:13px;">Display</strong>
-    <label><input type="checkbox" id="avg" /> Show average per model</label>
-    <label><input type="checkbox" id="excl-skills" /> Accuracy: exclude required_skills, nice_to_have_skills &amp; benefits</label>
+
+  <div id="tab-det" class="tab-panel">
+    <div class="charts">
+      <div class="card"><h2>Deterministic mean</h2><div class="chart-wrap"><canvas id="c-det-mean"></canvas></div></div>
+      <div class="card"><h2>Per-field accuracy</h2><div class="chart-wrap tall"><canvas id="c-det-fields"></canvas></div></div>
+    </div>
+  </div>
+
+  <div id="tab-judge" class="tab-panel">
+    <div class="charts">
+      <div class="card"><h2>Judge mean</h2><div class="chart-wrap"><canvas id="c-judge-mean"></canvas></div></div>
+      <div class="card"><h2>Per-field accuracy / F1</h2><div class="chart-wrap tall"><canvas id="c-judge-fields"></canvas></div></div>
+    </div>
+  </div>
+
+  <div id="tab-skills" class="tab-panel">
+    <div class="charts">
+      <div class="card"><h2>Required skills (precision / recall / F1)</h2><div class="chart-wrap tall"><canvas id="c-req-skills"></canvas></div></div>
+      <div class="card"><h2>Nice-to-have skills (precision / recall / F1)</h2><div class="chart-wrap tall"><canvas id="c-nth-skills"></canvas></div></div>
+      <div class="card"><h2>Benefits (precision / recall / F1)</h2><div class="chart-wrap tall"><canvas id="c-benefits"></canvas></div></div>
+    </div>
+  </div>
+
+  <div id="tab-eff" class="tab-panel">
+    <div class="charts">
+      <div class="card"><h2>Extraction cost total (USD)</h2><div class="chart-wrap"><canvas id="c-cost"></canvas></div></div>
+      <div class="card"><h2>Extraction latency mean (ms)</h2><div class="chart-wrap"><canvas id="c-lat-mean"></canvas></div></div>
+      <div class="card"><h2>Extraction latency p95 (ms)</h2><div class="chart-wrap"><canvas id="c-lat-p95"></canvas></div></div>
+      <div class="card"><h2>Overall score vs cost (per file)</h2><div class="chart-wrap"><canvas id="c-cost-vs-overall"></canvas></div></div>
+    </div>
   </div>
 </div>
-<div class="tabs">
-  <button class="tab active" data-target="tab-latency">Latency</button>
-  <button class="tab" data-target="tab-costs">Costs</button>
-  <button class="tab" data-target="tab-tokens">Tokens</button>
-  <button class="tab" data-target="tab-accuracy">Accuracy</button>
-</div>
-<div id="tab-latency" class="tab-panel active">
-  <div class="charts">
-    <div class="card"><h2>Latency per file (ms)</h2><div class="chart-wrap"><canvas id="latency"></canvas></div></div>
-    <div class="card"><h2>Average latency (ms)</h2><div class="chart-wrap"><canvas id="bar-avg-latency"></canvas></div></div>
-    <div class="card"><h2>Min latency (ms)</h2><div class="chart-wrap"><canvas id="bar-min-latency"></canvas></div></div>
-    <div class="card"><h2>Max latency (ms)</h2><div class="chart-wrap"><canvas id="bar-max-latency"></canvas></div></div>
-  </div>
-</div>
-<div id="tab-costs" class="tab-panel">
-  <div class="charts">
-    <div class="card"><h2>Cost per file (USD)</h2><div class="chart-wrap"><canvas id="cost"></canvas></div></div>
-    <div class="card"><h2>Total cost (USD)</h2><div class="chart-wrap"><canvas id="bar-total-cost"></canvas></div></div>
-    <div class="card"><h2>Min cost (USD)</h2><div class="chart-wrap"><canvas id="bar-min-cost"></canvas></div></div>
-    <div class="card"><h2>Max cost (USD)</h2><div class="chart-wrap"><canvas id="bar-max-cost"></canvas></div></div>
-  </div>
-</div>
-<div id="tab-tokens" class="tab-panel">
-  <div class="charts">
-    <div class="card"><h2>Input tokens per file</h2><div class="chart-wrap"><canvas id="input"></canvas></div></div>
-    <div class="card"><h2>Output tokens per file</h2><div class="chart-wrap"><canvas id="output"></canvas></div></div>
-    <div class="card"><h2>Total tokens (input + output)</h2><div class="chart-wrap"><canvas id="bar-total-tokens"></canvas></div></div>
-  </div>
-</div>
-<div id="tab-accuracy" class="tab-panel">
-  <div class="charts">
-    <div class="card"><h2>Average accuracy</h2><div class="chart-wrap"><canvas id="acc-__avg__"></canvas></div></div>
-  </div>
-  <div id="accuracy-per-file" class="charts" style="margin-top:24px;"></div>
-</div>
+
 <script>
 const palette = ["#2563eb","#dc2626","#16a34a","#d97706","#9333ea","#0891b2","#db2777","#65a30d","#7c3aed","#0d9488"];
 const naturalCompare = (a,b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 
-let data = {};
+let summaries = [];
+let selected = new Set();
 let charts = {};
-const metrics = [
-  { key: "latencyMs", canvas: "latency" },
-  { key: "costUsd", canvas: "cost" },
-  { key: "inputTokens", canvas: "input" },
-  { key: "outputTokens", canvas: "output" },
-];
-const barCharts = [
-  { canvas: "bar-min-latency",   field: "latencyMs", agg: "min" },
-  { canvas: "bar-max-latency",   field: "latencyMs", agg: "max" },
-  { canvas: "bar-avg-latency",   field: "latencyMs", agg: "avg" },
-  { canvas: "bar-min-cost",      field: "costUsd",   agg: "min" },
-  { canvas: "bar-max-cost",      field: "costUsd",   agg: "max" },
-  { canvas: "bar-total-cost",    field: "costUsd",   agg: "sum" },
-  { canvas: "bar-total-tokens",  field: "totalTokens", agg: "sum" },
+let sortKey = "overall";
+let sortDir = "desc"; // 'asc' | 'desc'
+let showPct = true;
+
+const DET_FIELDS = ["seniority","remote_policy","years_experience","company","title"];
+const JUDGE_SCALAR = ["location","salary_range"];
+const JUDGE_LIST_F1 = [
+  { key: "benefits_f1", label: "benefits F1" },
+  { key: "required_skills_f1", label: "required_skills F1" },
+  { key: "nice_to_have_skills_f1", label: "nice_to_have_skills F1" },
 ];
 
-let accuracyCharts = {};
-let accuracyFiles = [];
+const TABLE_COLUMNS = [
+  { key: "slug", label: "Model", kind: "string", className: "model" },
+  { key: "filesScored", label: "Files", kind: "int" },
+  { key: "overall", label: "Overall", kind: "frac" },
+  { key: "det_mean", label: "Det mean", kind: "frac" },
+  { key: "judge_mean", label: "Judge mean", kind: "frac" },
+  { key: "benefits_f1", label: "Benefits F1", kind: "frac" },
+  { key: "required_skills_f1", label: "Req skills F1", kind: "frac" },
+  { key: "nice_to_have_skills_f1", label: "NTH skills F1", kind: "frac" },
+  { key: "cost_total", label: "Cost (USD)", kind: "money" },
+  { key: "lat_mean", label: "Lat mean (ms)", kind: "ms" },
+  { key: "lat_p95", label: "Lat p95 (ms)", kind: "ms" },
+];
 
-function aggregate(values, agg) {
-  if (!values.length) return 0;
-  if (agg === "min") return Math.min(...values);
-  if (agg === "max") return Math.max(...values);
-  if (agg === "sum") return values.reduce((a,b)=>a+b,0);
-  if (agg === "avg") return values.reduce((a,b)=>a+b,0) / values.length;
-  return 0;
+function rowFor(s) {
+  return {
+    slug: s.slug,
+    filesScored: s.filesScored,
+    overall: s.overall,
+    det_mean: s.deterministic.mean,
+    judge_mean: s.judge.mean,
+    benefits_f1: s.judge.benefits_f1,
+    required_skills_f1: s.judge.required_skills_f1,
+    nice_to_have_skills_f1: s.judge.nice_to_have_skills_f1,
+    cost_total: s.extractionCostUsdTotal,
+    lat_mean: s.extractionLatencyMsMean,
+    lat_p95: s.extractionLatencyMsP95,
+    _raw: s,
+  };
 }
 
-function modelValues(model, field) {
-  const stats = data[model] || {};
-  return Object.values(stats).map(s => {
-    if (field === "totalTokens") return Number(s.inputTokens || 0) + Number(s.outputTokens || 0);
-    return Number(s[field] || 0);
-  });
+function formatCell(kind, v) {
+  if (v == null || (typeof v === 'number' && !isFinite(v))) return '—';
+  if (kind === 'frac') return showPct ? (v * 100).toFixed(1) + '%' : v.toFixed(3);
+  if (kind === 'money') return '$' + v.toFixed(4);
+  if (kind === 'ms') return Math.round(v).toLocaleString();
+  if (kind === 'int') return String(v);
+  return String(v);
 }
 
-function selectedModels() {
-  return [...document.querySelectorAll('#models input:checked')].map(i => i.value);
+function paletteFor(slug) {
+  const all = summaries.map(s => s.slug).sort(naturalCompare);
+  const i = all.indexOf(slug);
+  return palette[(i < 0 ? 0 : i) % palette.length];
 }
 
-function buildDatasets(metric, models, showAvg) {
-  const fileSet = new Set();
-  models.forEach(m => Object.keys(data[m] || {}).forEach(f => fileSet.add(f)));
-  const labels = [...fileSet].sort(naturalCompare);
-  const datasets = models.map((m, idx) => {
-    const color = palette[idx % palette.length];
-    const points = labels.map(l => {
-      const v = data[m]?.[l]?.[metric];
-      return v === undefined ? null : v;
-    });
-    const ds = [{
-      label: m,
-      data: points,
-      borderColor: color,
-      backgroundColor: color,
-      spanGaps: true,
-      tension: 0.2,
-      pointRadius: 2,
-    }];
-    if (showAvg) {
-      const nums = points.filter(p => typeof p === "number");
-      const avg = nums.length ? nums.reduce((a,b)=>a+b,0) / nums.length : 0;
-      ds.push({
-        label: m + " (avg)",
-        data: labels.map(() => avg),
-        borderColor: color,
-        backgroundColor: color,
-        borderDash: [6, 4],
-        pointRadius: 0,
-        borderWidth: 1.5,
-      });
+function selectedRowsSorted() {
+  // Always sort table by current sortKey/sortDir; chart input is whichever models are selected.
+  const rows = summaries.map(rowFor);
+  rows.sort((a, b) => {
+    const A = a[sortKey], B = b[sortKey];
+    if (typeof A === 'string' && typeof B === 'string') {
+      return sortDir === 'asc' ? naturalCompare(A, B) : naturalCompare(B, A);
     }
-    return ds;
-  }).flat();
-  return { labels, datasets };
+    return sortDir === 'asc' ? (A - B) : (B - A);
+  });
+  return rows;
 }
 
-function render() {
-  const models = selectedModels();
-  const showAvg = document.getElementById('avg').checked;
-  metrics.forEach(({ key, canvas }) => {
-    const { labels, datasets } = buildDatasets(key, models, showAvg);
-    const chart = charts[canvas];
-    chart.data.labels = labels;
-    chart.data.datasets = datasets;
-    chart.update();
-  });
-  barCharts.forEach(({ canvas, field, agg }) => {
-    const chart = charts[canvas];
-    const rows = models
-      .map((m, i) => ({ m, v: aggregate(modelValues(m, field), agg), color: palette[i % palette.length] }))
-      .sort((a, b) => a.v - b.v);
-    chart.data.labels = rows.map(r => r.m);
-    chart.data.datasets = [{
-      label: agg + " " + field,
-      data: rows.map(r => r.v),
-      backgroundColor: rows.map(r => r.color),
-      borderColor: rows.map(r => r.color),
-      borderWidth: 1,
-    }];
-    chart.update();
-  });
-  renderAccuracy(models);
-}
+function renderTable() {
+  const tbl = document.getElementById('leaderboard');
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const col of TABLE_COLUMNS) {
+    const th = document.createElement('th');
+    th.className = col.className || '';
+    th.textContent = col.label;
+    const arrow = document.createElement('span');
+    arrow.className = 'arrow';
+    arrow.textContent = sortKey === col.key ? (sortDir === 'asc' ? '▲' : '▼') : '';
+    th.appendChild(arrow);
+    th.addEventListener('click', () => {
+      if (sortKey === col.key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      else { sortKey = col.key; sortDir = col.kind === 'string' ? 'asc' : 'desc'; }
+      renderTable();
+    });
+    headRow.appendChild(th);
+  }
+  head.appendChild(headRow);
 
-function renderAccuracy(models) {
-  const allModelsAlpha = Object.keys(data).sort(naturalCompare);
-  const field = document.getElementById('excl-skills').checked ? 'accuracyExclSkills' : 'accuracy';
-  accuracyFiles.forEach(file => {
-    const chart = accuracyCharts[file];
-    if (!chart) return;
-    const rows = models.map(m => {
-      const idx = allModelsAlpha.indexOf(m);
-      let v;
-      if (file === "__avg__") {
-        const stats = data[m] || {};
-        const acc = Object.values(stats).map(s => s[field]).filter(x => typeof x === "number");
-        v = acc.length ? acc.reduce((a,b)=>a+b,0) / acc.length : 0;
+  const body = document.createElement('tbody');
+  const rows = selectedRowsSorted();
+
+  // For bar visualization, normalize per-column on the full set
+  const colMax = {};
+  for (const col of TABLE_COLUMNS) {
+    if (col.kind === 'string' || col.kind === 'int') continue;
+    colMax[col.key] = Math.max(0, ...rows.map(r => Number(r[col.key]) || 0));
+  }
+
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    if (!selected.has(r.slug)) tr.classList.add('dimmed');
+    tr.addEventListener('click', () => {
+      if (selected.has(r.slug)) selected.delete(r.slug); else selected.add(r.slug);
+      renderTable();
+      renderCharts();
+      syncCheckboxes();
+    });
+    for (const col of TABLE_COLUMNS) {
+      const td = document.createElement('td');
+      td.className = col.className || '';
+      if (col.kind !== 'string' && col.kind !== 'int') {
+        td.classList.add('bar-cell');
+        const max = colMax[col.key] || 1;
+        const v = Number(r[col.key]) || 0;
+        const ratio = max ? Math.min(1, v / max) : 0;
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.width = (ratio * 100).toFixed(1) + '%';
+        bar.style.background = paletteFor(r.slug) + '22';
+        bar.style.borderRightColor = paletteFor(r.slug);
+        td.appendChild(bar);
+        const val = document.createElement('span');
+        val.className = 'val';
+        val.textContent = formatCell(col.kind, r[col.key]);
+        td.appendChild(val);
       } else {
-        v = data[m]?.[file]?.[field] ?? 0;
+        td.textContent = formatCell(col.kind, r[col.key]);
       }
-      return { m, v, color: palette[idx % palette.length] };
-    }).sort((a, b) => a.v - b.v);
-    chart.data.labels = rows.map(r => r.m);
-    chart.data.datasets = [{
-      label: "accuracy %",
-      data: rows.map(r => r.v),
-      backgroundColor: rows.map(r => r.color),
-      borderColor: rows.map(r => r.color),
-      borderWidth: 1,
-    }];
-    chart.update();
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  tbl.replaceChildren(head, body);
+}
+
+function syncCheckboxes() {
+  document.querySelectorAll('#models input').forEach(i => {
+    i.checked = selected.has(i.value);
   });
+}
+
+function selectedSummaries() {
+  return summaries.filter(s => selected.has(s.slug));
+}
+
+function sortedByMetric(values) {
+  // values: [{ slug, v }]
+  return [...values].sort((a, b) => a.v - b.v);
+}
+
+function makeBarChart(canvasId, opts) {
+  const ctx = document.getElementById(canvasId);
+  return new Chart(ctx, {
+    type: 'bar',
+    data: { labels: [], datasets: [] },
+    options: Object.assign({
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true } },
+    }, opts || {}),
+  });
+}
+
+function makeGroupedBar(canvasId) {
+  return new Chart(document.getElementById(canvasId), {
+    type: 'bar',
+    data: { labels: [], datasets: [] },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom' } },
+      scales: { x: { beginAtZero: true, max: 1, ticks: { callback: v => fmtFraction(v) } } },
+    },
+  });
+}
+
+function fmtFraction(v) { return showPct ? (v * 100).toFixed(0) + '%' : Number(v).toFixed(2); }
+
+function setSingleBar(chart, rows, opts) {
+  rows = sortedByMetric(rows);
+  chart.data.labels = rows.map(r => r.slug);
+  chart.data.datasets = [{
+    label: opts.label,
+    data: rows.map(r => r.v),
+    backgroundColor: rows.map(r => paletteFor(r.slug)),
+    borderColor: rows.map(r => paletteFor(r.slug)),
+    borderWidth: 1,
+  }];
+  const max = opts.max;
+  const isFrac = !!opts.frac;
+  chart.options.scales.x.max = max;
+  chart.options.scales.x.ticks = { callback: v => isFrac ? fmtFraction(v) : opts.tickFmt ? opts.tickFmt(v) : v };
+  chart.options.plugins.tooltip = {
+    callbacks: { label: c => opts.tooltipFmt ? opts.tooltipFmt(c.parsed.x) : (isFrac ? fmtFraction(c.parsed.x) : String(c.parsed.x)) },
+  };
+  chart.update();
+}
+
+function setGroupedBar(chart, sums, fields, fieldLabel, valueAt) {
+  // datasets = one per field; labels = model slugs (sorted by mean across fields desc)
+  const slugs = sums.map(s => s.slug);
+  // Sort slugs by mean across the displayed fields (descending) so leaders are on top.
+  slugs.sort((a, b) => {
+    const sa = sums.find(s => s.slug === a), sb = sums.find(s => s.slug === b);
+    const ma = fields.reduce((acc, f) => acc + valueAt(sa, f.key), 0) / (fields.length || 1);
+    const mb = fields.reduce((acc, f) => acc + valueAt(sb, f.key), 0) / (fields.length || 1);
+    return ma - mb;
+  });
+  const slugColor = (slug) => paletteFor(slug);
+  chart.data.labels = slugs;
+  chart.data.datasets = fields.map((f, i) => ({
+    label: f.label || f.key,
+    data: slugs.map(slug => valueAt(sums.find(s => s.slug === slug), f.key)),
+    backgroundColor: slugs.map(slug => withAlpha(slugColor(slug), 0.5 + 0.5 * (i / Math.max(1, fields.length - 1)))),
+    borderColor: slugs.map(slug => slugColor(slug)),
+    borderWidth: 1,
+  }));
+  chart.options.plugins.tooltip = {
+    callbacks: { label: c => c.dataset.label + ': ' + fmtFraction(c.parsed.x) },
+  };
+  chart.update();
+}
+
+function withAlpha(hex, a) {
+  const h = hex.replace('#','');
+  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(2) + ')';
+}
+
+function renderCharts() {
+  const sums = selectedSummaries();
+  if (sums.length === 0) {
+    Object.values(charts).forEach(c => { c.data.labels = []; c.data.datasets = []; c.update(); });
+    return;
+  }
+
+  setSingleBar(charts['c-overall'], sums.map(s => ({ slug: s.slug, v: s.overall })),
+    { label: 'overall', max: 1, frac: true });
+
+  // Det vs Judge mean as grouped bars
+  setGroupedBar(charts['c-det-vs-judge'], sums,
+    [{ key: 'det_mean', label: 'deterministic mean' }, { key: 'judge_mean', label: 'judge mean' }],
+    null,
+    (s, k) => k === 'det_mean' ? s.deterministic.mean : s.judge.mean);
+
+  setSingleBar(charts['c-det-mean'], sums.map(s => ({ slug: s.slug, v: s.deterministic.mean })),
+    { label: 'det mean', max: 1, frac: true });
+
+  setGroupedBar(charts['c-det-fields'], sums,
+    DET_FIELDS.map(f => ({ key: f, label: f })),
+    null,
+    (s, k) => s.deterministic[k]);
+
+  setSingleBar(charts['c-judge-mean'], sums.map(s => ({ slug: s.slug, v: s.judge.mean })),
+    { label: 'judge mean', max: 1, frac: true });
+
+  const judgeFields = [
+    ...JUDGE_SCALAR.map(k => ({ key: k, label: k })),
+    ...JUDGE_LIST_F1,
+  ];
+  setGroupedBar(charts['c-judge-fields'], sums, judgeFields, null,
+    (s, k) => s.judge[k]);
+
+  setGroupedBar(charts['c-req-skills'], sums,
+    [
+      { key: 'required_skills_precision', label: 'precision' },
+      { key: 'required_skills_recall', label: 'recall' },
+      { key: 'required_skills_f1', label: 'F1' },
+    ], null, (s, k) => s.judge[k]);
+
+  setGroupedBar(charts['c-nth-skills'], sums,
+    [
+      { key: 'nice_to_have_skills_precision', label: 'precision' },
+      { key: 'nice_to_have_skills_recall', label: 'recall' },
+      { key: 'nice_to_have_skills_f1', label: 'F1' },
+    ], null, (s, k) => s.judge[k]);
+
+  setGroupedBar(charts['c-benefits'], sums,
+    [
+      { key: 'benefits_precision', label: 'precision' },
+      { key: 'benefits_recall', label: 'recall' },
+      { key: 'benefits_f1', label: 'F1' },
+    ], null, (s, k) => s.judge[k]);
+
+  setSingleBar(charts['c-cost'], sums.map(s => ({ slug: s.slug, v: s.extractionCostUsdTotal })),
+    { label: 'cost', tickFmt: v => '$' + Number(v).toFixed(3), tooltipFmt: v => '$' + Number(v).toFixed(4) });
+
+  setSingleBar(charts['c-lat-mean'], sums.map(s => ({ slug: s.slug, v: s.extractionLatencyMsMean })),
+    { label: 'latency mean (ms)', tickFmt: v => Math.round(v).toLocaleString(), tooltipFmt: v => Math.round(v).toLocaleString() + ' ms' });
+
+  setSingleBar(charts['c-lat-p95'], sums.map(s => ({ slug: s.slug, v: s.extractionLatencyMsP95 })),
+    { label: 'latency p95 (ms)', tickFmt: v => Math.round(v).toLocaleString(), tooltipFmt: v => Math.round(v).toLocaleString() + ' ms' });
+
+  // Cost-vs-Overall scatter (one point per model)
+  const scatter = charts['c-cost-vs-overall'];
+  scatter.data.datasets = [{
+    label: 'models',
+    data: sums.map(s => ({ x: s.extractionCostUsdTotal, y: s.overall, slug: s.slug })),
+    backgroundColor: sums.map(s => paletteFor(s.slug)),
+    borderColor: sums.map(s => paletteFor(s.slug)),
+    pointRadius: 6,
+    pointHoverRadius: 8,
+  }];
+  scatter.update();
 }
 
 function activateTab(id) {
@@ -366,46 +447,60 @@ function activateTab(id) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === id));
 }
 
-function init(initial) {
-  data = initial;
-  const allModels = Object.keys(data).sort(naturalCompare);
+function init(payload) {
+  summaries = payload || [];
+  if (summaries.length === 0) {
+    document.getElementById('empty').style.display = 'block';
+    return;
+  }
+  document.getElementById('app').style.display = 'block';
+  selected = new Set(summaries.map(s => s.slug));
+
+  // Build model checkbox row.
+  const all = summaries.map(s => s.slug).sort(naturalCompare);
   const container = document.getElementById('models');
-  container.innerHTML = allModels.map(m =>
+  container.innerHTML = all.map(m =>
     '<label><input type="checkbox" value="' + m + '" checked /> ' + m + '</label>'
   ).join('');
-  container.addEventListener('change', render);
-  document.getElementById('avg').addEventListener('change', render);
-  document.getElementById('excl-skills').addEventListener('change', render);
+  container.addEventListener('change', () => {
+    selected = new Set([...container.querySelectorAll('input:checked')].map(i => i.value));
+    renderTable();
+    renderCharts();
+  });
   document.getElementById('all').addEventListener('click', () => {
-    document.querySelectorAll('#models input').forEach(i => i.checked = true); render();
+    selected = new Set(all); syncCheckboxes(); renderTable(); renderCharts();
   });
   document.getElementById('none').addEventListener('click', () => {
-    document.querySelectorAll('#models input').forEach(i => i.checked = false); render();
+    selected = new Set(); syncCheckboxes(); renderTable(); renderCharts();
   });
-  metrics.forEach(({ canvas }) => {
-    charts[canvas] = new Chart(document.getElementById(canvas), {
-      type: 'line',
-      data: { labels: [], datasets: [] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: 'nearest', intersect: false },
-        scales: { y: { beginAtZero: true } },
+  document.getElementById('pct').addEventListener('change', (e) => {
+    showPct = e.target.checked;
+    renderTable();
+    renderCharts();
+  });
+
+  // Charts.
+  ['c-overall','c-det-mean','c-judge-mean','c-cost','c-lat-mean','c-lat-p95']
+    .forEach(id => charts[id] = makeBarChart(id));
+  ['c-det-vs-judge','c-det-fields','c-judge-fields','c-req-skills','c-nth-skills','c-benefits']
+    .forEach(id => charts[id] = makeGroupedBar(id));
+  charts['c-cost-vs-overall'] = new Chart(document.getElementById('c-cost-vs-overall'), {
+    type: 'scatter',
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => c.raw.slug + ' — overall ' + fmtFraction(c.raw.y) + ', cost $' + Number(c.raw.x).toFixed(4) } },
       },
-    });
-  });
-  barCharts.forEach(({ canvas }) => {
-    charts[canvas] = new Chart(document.getElementById(canvas), {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true } },
+      scales: {
+        x: { title: { display: true, text: 'extraction cost total (USD)' }, beginAtZero: true, ticks: { callback: v => '$' + Number(v).toFixed(3) } },
+        y: { title: { display: true, text: 'overall score' }, beginAtZero: true, max: 1, ticks: { callback: v => fmtFraction(v) } },
       },
-    });
+    },
   });
+
   document.querySelectorAll('.tabs').forEach(tabsEl => {
     tabsEl.addEventListener('click', (e) => {
       const btn = e.target.closest('.tab');
@@ -413,33 +508,14 @@ function init(initial) {
     });
   });
 
-  const fileSet = new Set();
-  allModels.forEach(m => Object.entries(data[m] || {}).forEach(([f, s]) => {
-    if (typeof s.accuracy === "number") fileSet.add(f);
-  }));
-  const perFileAccuracy = [...fileSet].sort(naturalCompare);
-  accuracyFiles = ["__avg__", ...perFileAccuracy];
-  const accPerFileEl = document.getElementById('accuracy-per-file');
-  accPerFileEl.innerHTML = perFileAccuracy.map(f =>
-    '<div class="card"><h2>' + f + ' accuracy</h2><div class="chart-wrap"><canvas id="acc-' + f + '"></canvas></div></div>'
-  ).join('');
-  accuracyFiles.forEach(f => {
-    accuracyCharts[f] = new Chart(document.getElementById('acc-' + f), {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-      options: {
-        indexAxis: 'y',
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.x.toFixed(1) + '%' } } },
-        scales: { x: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } } },
-      },
-    });
-  });
-  render();
+  renderTable();
+  renderCharts();
 }
 
-fetch('/api/data').then(r => r.json()).then(init);
+fetch('/api/summaries').then(r => r.json()).then(init).catch(err => {
+  document.getElementById('empty').style.display = 'block';
+  document.getElementById('empty').textContent = 'Failed to load report: ' + err;
+});
 </script>
 </body>
 </html>
@@ -456,10 +532,10 @@ const server = createServer(async (req, res) => {
       res.end(HTML);
       return;
     }
-    if (req.url === "/api/data") {
-      const data = await loadData();
+    if (req.url === "/api/summaries") {
+      const summaries = await loadSummaries();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(data));
+      res.end(JSON.stringify(summaries));
       return;
     }
     res.writeHead(404).end("Not found");
