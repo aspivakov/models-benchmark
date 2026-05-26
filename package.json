@@ -27,7 +27,8 @@
     "run:o4-mini": "tsx src/index.ts o4-mini",
     "run:gemini-flash": "tsx src/index.ts gemini-flash",
     "run:gemini-pro": "tsx src/index.ts gemini-pro",
-    "run:gemini-pro-thinking": "tsx src/index.ts gemini-pro-thinking"
+    "run:gemini-pro-thinking": "tsx src/index.ts gemini-pro-thinking",
+    "serve": "tsx src/server.ts"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
