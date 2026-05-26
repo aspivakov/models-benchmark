@@ -115,11 +115,11 @@ Each JSON file contains the full `RunResult` including extracted fields, token c
 
 The eval pipeline scores each `(model, input file)` pair, so all three sources must be present and aligned by filename (`jpN.txt` ↔ `jpN.json`):
 
-| Location                          | What it holds                          | How it gets there                                          |
-| --------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
-| `input/<inputFile>.txt`           | Original posting text (source of truth) | You add these manually                                     |
-| `ground_truth/<inputFile>.json`   | Reference extraction (a guide)          | Generated separately (e.g. by Claude Opus) — may contain errors |
-| `output/<slug>/<inputFile>.json`  | A model's `RunResult` to be scored      | Produced by the `run:*` benchmark commands                 |
+| Location                         | What it holds                           | How it gets there                                               |
+| -------------------------------- | --------------------------------------- | --------------------------------------------------------------- |
+| `input/<inputFile>.txt`          | Original posting text (source of truth) | You add these manually                                          |
+| `ground_truth/<inputFile>.json`  | Reference extraction (a guide)          | Generated separately (e.g. by Claude Opus) — may contain errors |
+| `output/<slug>/<inputFile>.json` | A model's `RunResult` to be scored      | Produced by the `run:*` benchmark commands                      |
 
 A pair is only scored when **all three** exist. Pairs missing an `input/` or `ground_truth/` file are skipped with a warning.
 
@@ -178,6 +178,10 @@ npm run eval:report
 - **Judge model:** Gemini 2.5 Pro. Chosen because it's a different provider family from most of the evaluated models (5 of 9 are Anthropic or OpenAI), reducing self-preference bias.
 - **List field scoring:** precision and recall are reported separately. Hallucinated items (in model output but not in the posting) and missed items (in the posting but absent from the model output) are listed by name in each per-pair score file, so any aggregate score is auditable.
 - **Overall score weighting:** deterministic fields weight 1 each (5 total); judge string fields weight 1 each (2 total); judge list fields weight 2 each (6 total). Total weight 13. List fields are weighted higher because they are richer signals and the harder task for these models.
+
+## Screenshot
+
+![Benchmark results UI](assets/example.png)
 
 ## License
 
