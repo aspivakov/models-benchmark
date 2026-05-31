@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { PRICING } from '../pricing';
 import { JUDGE_SYSTEM_PROMPT, buildJudgeUserMessage } from './prompts';
 
-const JUDGE_MODEL = 'gemini-2.5-pro';
+const JUDGE_MODEL = 'gemini-3.1-pro-preview';
 
 const STRING_FIELD_SCHEMA = {
   type: Type.OBJECT,
@@ -35,7 +35,13 @@ const RESPONSE_SCHEMA = {
     required_skills: LIST_FIELD_SCHEMA,
     nice_to_have_skills: LIST_FIELD_SCHEMA,
   },
-  required: ['location', 'salary_range', 'benefits', 'required_skills', 'nice_to_have_skills'],
+  required: [
+    'location',
+    'salary_range',
+    'benefits',
+    'required_skills',
+    'nice_to_have_skills',
+  ],
 };
 
 export type JudgeStringFieldRaw = { match: boolean; notes: string };
@@ -103,7 +109,8 @@ export async function runJudge(
   const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
   const pricing = PRICING[JUDGE_MODEL];
   const costUsd = pricing
-    ? (inputTokens / 1_000_000) * pricing.inputPerMToken + (outputTokens / 1_000_000) * pricing.outputPerMToken
+    ? (inputTokens / 1_000_000) * pricing.inputPerMToken +
+      (outputTokens / 1_000_000) * pricing.outputPerMToken
     : 0;
 
   return { verdict, costUsd, latencyMs };

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { SERVE_MODELS } from "./config";
 import { loadSummaries } from "./eval/runReport";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -533,7 +534,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.url === "/api/summaries") {
-      const summaries = await loadSummaries();
+      const summaries = await loadSummaries(SERVE_MODELS);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(summaries));
       return;

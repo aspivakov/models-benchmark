@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { calculateCost, type ModelConfig } from '../config';
 import { logRawResponse, parseModelJson } from '../parse';
 import { SYSTEM_PROMPT } from '../prompts';
@@ -34,8 +34,18 @@ export async function runGemini(
     responseSchema: RESPONSE_SCHEMA,
   };
 
-  if (config.thinkingEnabled && config.thinkingBudget != null) {
-    generationConfig.thinkingConfig = { thinkingBudget: config.thinkingBudget };
+  if (config.thinkingEnabled) {
+    if (config.thinkingLevel != null) {
+      // Gemini 3.x: control reasoning via thinkingLevel.
+      const levelMap: Record<'low' | 'medium' | 'high', ThinkingLevel> = {
+        low: ThinkingLevel.LOW,
+        medium: ThinkingLevel.MEDIUM,
+        high: ThinkingLevel.HIGH,
+      };
+      generationConfig.thinkingConfig = { thinkingLevel: levelMap[config.thinkingLevel] };
+    } else if (config.thinkingBudget != null) {
+      generationConfig.thinkingConfig = { thinkingBudget: config.thinkingBudget };
+    }
   }
 
   const start = Date.now();

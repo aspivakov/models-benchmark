@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { existsSync } from 'fs';
 import { mkdir, readdir, writeFile } from 'fs/promises';
 import path from 'path';
+import { MODEL_CONFIGS, resolveOutputDir } from '../config';
 import { scoreOnePair } from './scoreOne';
 
 const ROOT = process.cwd();
@@ -10,12 +11,18 @@ const INPUT_DIR = path.join(ROOT, 'input');
 const GROUND_TRUTH_DIR = path.join(ROOT, 'ground_truth');
 const SCORES_DIR = path.join(ROOT, 'eval', 'scores');
 
+// A model filter can be given either as a config key (e.g. "haiku",
+// "gemini-pro-thinking") matching the run:* scripts, or as a raw output
+// directory name (e.g. "claude-haiku-4-5"). Config keys are resolved to their
+// output directory via resolveOutputDir so the judge scopes to exactly that
+// model's files.
 async function listSlugs(filter: string[]): Promise<string[]> {
   if (!existsSync(OUTPUT_DIR)) return [];
   const entries = await readdir(OUTPUT_DIR, { withFileTypes: true });
   const all = entries.filter((e) => e.isDirectory()).map((e) => e.name);
   if (filter.length === 0) return all;
-  return all.filter((s) => filter.includes(s));
+  const wanted = new Set(filter.map(resolveOutputDir));
+  return all.filter((s) => wanted.has(s));
 }
 
 async function listScoredFiles(slug: string, fileFilter: string[]): Promise<string[]> {
@@ -53,7 +60,12 @@ async function main(): Promise<void> {
   const slugs = await listSlugs(argSlugs);
 
   if (slugs.length === 0) {
-    console.error('No model output directories found in output/.');
+    if (argSlugs.length > 0) {
+      console.error(`No matching model output found for: ${argSlugs.join(', ')}`);
+      console.error('Available config keys:', Object.keys(MODEL_CONFIGS).join(', '));
+    } else {
+      console.error('No model output directories found in output/.');
+    }
     process.exit(1);
   }
 

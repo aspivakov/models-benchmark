@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { readdir, readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { resolveOutputDir } from '../config';
 import type { RunResult } from '../types';
 import type { ModelSummary, PairScore } from './types';
 
@@ -107,10 +108,14 @@ function summarize(slug: string, scores: PairScore[], extraction: { costTotal: n
   };
 }
 
-export async function loadSummaries(): Promise<ModelSummary[]> {
+export async function loadSummaries(modelFilter: string[] = []): Promise<ModelSummary[]> {
   if (!existsSync(SCORES_DIR)) return [];
   const slugEntries = await readdir(SCORES_DIR, { withFileTypes: true });
-  const slugs = slugEntries.filter((e) => e.isDirectory()).map((e) => e.name);
+  let slugs = slugEntries.filter((e) => e.isDirectory()).map((e) => e.name);
+  if (modelFilter.length > 0) {
+    const wanted = new Set(modelFilter.map(resolveOutputDir));
+    slugs = slugs.filter((s) => wanted.has(s));
+  }
 
   const summaries: ModelSummary[] = [];
   for (const slug of slugs) {

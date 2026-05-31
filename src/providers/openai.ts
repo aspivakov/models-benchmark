@@ -14,18 +14,19 @@ export async function runOpenAI(
   let response: OpenAI.Chat.ChatCompletion;
 
   if (config.thinkingEnabled) {
-    // o4-mini: reasoning model — no system role, use max_completion_tokens
+    // Reasoning model: no system role, use max_completion_tokens and reasoning_effort.
     response = await client.chat.completions.create({
       model: config.model,
       response_format: { type: 'json_object' },
       max_completion_tokens: 8000,
+      ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
       messages: [{ role: 'user', content: `${SYSTEM_PROMPT}\n\n${jobText}` }],
     });
   } else {
     response = await client.chat.completions.create({
       model: config.model,
       response_format: { type: 'json_object' },
-      max_tokens: 4096,
+      max_completion_tokens: 4096,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: jobText },

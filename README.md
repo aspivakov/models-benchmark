@@ -28,14 +28,14 @@ The task is structured data extraction from unstructured text. Every model recei
 | `haiku`               | claude-haiku-4-5-20251001 | Anthropic | standard                                     |
 | `sonnet`              | claude-sonnet-4-6         | Anthropic | standard                                     |
 | `sonnet-thinking`     | claude-sonnet-4-6         | Anthropic | extended thinking (high-effort, 3 files max) |
-| `gpt4o-mini`          | gpt-4o-mini               | OpenAI    | standard                                     |
-| `gpt4o`               | gpt-4o                    | OpenAI    | standard                                     |
-| `o4-mini`             | o4-mini                   | OpenAI    | reasoning (high-effort, 3 files max)         |
-| `gemini-flash`        | gemini-2.5-flash          | Gemini    | standard                                     |
-| `gemini-pro`          | gemini-2.5-pro            | Gemini    | standard                                     |
-| `gemini-pro-thinking` | gemini-2.5-pro            | Gemini    | thinking (high-effort, 3 files max)          |
+| `gpt5.4-mini`         | gpt-5.4-mini              | OpenAI    | standard                                     |
+| `gpt5.4`              | gpt-5.4                   | OpenAI    | standard                                     |
+| `gpt5.4-thinking`     | gpt-5.4                   | OpenAI    | reasoning (high-effort, 3 files max)         |
+| `gemini-flash`        | gemini-3.1-flash-lite     | Gemini    | standard                                     |
+| `gemini-pro`          | gemini-3.1-pro-preview    | Gemini    | standard                                     |
+| `gemini-pro-thinking` | gemini-3.1-pro-preview    | Gemini    | thinking (high-effort, 3 files max)          |
 
-**High-effort configs** (`sonnet-thinking`, `o4-mini`, `gemini-pro-thinking`) are expensive and require you to pass exactly 3 input filenames explicitly, so you can control cost.
+**High-effort configs** (`sonnet-thinking`, `gpt5.4-thinking`, `gemini-pro-thinking`) are expensive and require you to pass exactly 3 input filenames explicitly, so you can control cost. `gpt5.4-thinking` runs GPT-5.4 with `reasoning_effort: high`; `gemini-pro-thinking` runs Gemini 3.1 Pro with `thinkingLevel: high`.
 
 ## Prerequisites
 
@@ -75,8 +75,8 @@ Standard configs process all `.txt` files in `input/` automatically:
 ```bash
 npm run run:haiku
 npm run run:sonnet
-npm run run:gpt4o-mini
-npm run run:gpt4o
+npm run run:gpt5.4-mini
+npm run run:gpt5.4
 npm run run:gemini-flash
 npm run run:gemini-pro
 ```
@@ -85,7 +85,7 @@ High-effort configs require exactly 3 filenames to keep costs predictable:
 
 ```bash
 npm run run:sonnet:thinking -- jp1.txt jp5.txt jp12.txt
-npm run run:o4-mini -- jp1.txt jp5.txt jp12.txt
+npm run run:gpt5.4-thinking -- jp1.txt jp5.txt jp12.txt
 npm run run:gemini-pro-thinking -- jp1.txt jp5.txt jp12.txt
 ```
 
